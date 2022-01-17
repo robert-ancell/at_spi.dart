@@ -199,7 +199,7 @@ class AtSpiClient {
   final _remoteClients = <String, AtSpiRemoteClient>{};
 
   /// Creates a new AT-SPI client connected to the session D-Bus.
-  AtSpiClient({DBusClient? sessionBus}) : _sessionBus = sessionBus {}
+  AtSpiClient({DBusClient? sessionBus}) : _sessionBus = sessionBus;
 
   /// Connects to AT-SPI.
   /// Must be called before accessing methods and properties.
