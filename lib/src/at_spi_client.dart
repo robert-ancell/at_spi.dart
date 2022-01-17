@@ -221,7 +221,6 @@ class AtSpiClient {
         name: 'GetAddress',
         replySignature: DBusSignature('s'));
     var address = (result.returnValues[0] as DBusString).value;
-    print(address);
     if (closeBus) {
       await bus.close();
     }
