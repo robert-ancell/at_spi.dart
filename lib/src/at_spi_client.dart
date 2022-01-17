@@ -154,42 +154,35 @@ class AtSpiRemoteClient {
           destination: address,
           path: DBusObjectPath('/org/a11y/atspi/cache'),
           interface: 'org.a11y.atspi.Cache',
-          name: 'GetItems');
+          name: 'GetItems',
+          replySignature: DBusSignature('a((so)(so)(so)iiassusau)'));
     } on DBusUnknownObjectException {
       return;
     } on DBusUnknownMethodException {
       return;
     }
 
-    if (result.signature == DBusSignature('a((so)(so)(so)iiassusau)')) {
-      var nodes = result.returnValues[0] as DBusArray;
-      for (var node in nodes.children) {
-        var values = (node as DBusStruct).children;
-        var name = values[0] as DBusStruct;
-        var namePath = name.children[1] as DBusObjectPath;
-        //var application = values[1] as DBusStruct;
-        var parent = values[2] as DBusStruct;
-        var parentPath = parent.children[1] as DBusObjectPath;
-        //var ? = (values[3] as DBusInt32).value;
-        //var ? = (values[4] as DBusInt32).value;
-        var interfaces = (values[5] as DBusArray)
-            .children
-            .map((value) => (value as DBusString).value)
-            .toList();
-        var description = (values[6] as DBusString).value;
-        var roleNumber = (values[7] as DBusUint32).value;
-        var role = AtSpiRole.values[roleNumber]; // FIXME: Handle errors
-        //var ? = (values[8] as DBusString).value;
-        //var state = (values[9] as DBusArray).children.map((value) => (value as DBusUint32).value).toList();
-        print(
-            '${namePath.value} ${parentPath.value} $interfaces $description $role');
-      }
-    } else if (result.signature ==
-        DBusSignature('a((so)(so)(so)a(so)assusau)')) {
-      // FIXME: Just getting from the registry - shouldn't be accessing it.
-      //print('$address ${result.returnValues}');
-    } else {
-      print(result.signature);
+    var nodes = result.returnValues[0] as DBusArray;
+    for (var node in nodes.children) {
+      var values = (node as DBusStruct).children;
+      var name = values[0] as DBusStruct;
+      var namePath = name.children[1] as DBusObjectPath;
+      //var application = values[1] as DBusStruct;
+      var parent = values[2] as DBusStruct;
+      var parentPath = parent.children[1] as DBusObjectPath;
+      //var ? = (values[3] as DBusInt32).value;
+      //var ? = (values[4] as DBusInt32).value;
+      var interfaces = (values[5] as DBusArray)
+          .children
+          .map((value) => (value as DBusString).value)
+          .toList();
+      var description = (values[6] as DBusString).value;
+      var roleNumber = (values[7] as DBusUint32).value;
+      var role = AtSpiRole.values[roleNumber]; // FIXME: Handle errors
+      //var ? = (values[8] as DBusString).value;
+      //var state = (values[9] as DBusArray).children.map((value) => (value as DBusUint32).value).toList();
+      print(
+          '$address ${namePath.value} ${parentPath.value} $interfaces $description $role');
     }
   }
 }
@@ -201,6 +194,7 @@ class AtSpiClient {
 
   // The bus AT-SPI is running on.
   DBusClient? _atSpiBus;
+  String? _registryOwner;
 
   final _remoteClients = <String, AtSpiRemoteClient>{};
 
@@ -233,8 +227,11 @@ class AtSpiClient {
     }
 
     _atSpiBus = DBusClient(DBusAddress(address));
+    _registryOwner = await _atSpiBus!.getNameOwner('org.a11y.atspi.Registry');
     _atSpiBus!.nameOwnerChanged.listen((event) {
-      if (event.oldOwner == null) {
+      if (event.name == 'org.a11y.atspi.Registry') {
+        _registryOwner = event.newOwner;
+      } else if (event.oldOwner == null) {
         _remoteClientAdded(event.name);
       } else if (event.newOwner == null) {
         _remoteClientRemoved(event.name);
@@ -247,7 +244,7 @@ class AtSpiClient {
   }
 
   void _remoteClientAdded(String name) {
-    if (!name.startsWith(':')) {
+    if (!name.startsWith(':') || name == _registryOwner) {
       return;
     }
 
@@ -261,6 +258,10 @@ class AtSpiClient {
   }
 
   void _remoteClientRemoved(String name) {
+    if (!name.startsWith(':') || name == _registryOwner) {
+      return;
+    }
+
     var remoteClient = _remoteClients[name];
     _remoteClients.remove(name);
     if (remoteClient != null) {}
