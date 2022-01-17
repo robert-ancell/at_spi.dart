@@ -48,6 +48,7 @@ class MockAtSpiRegistryServer extends DBusClient {
 void main() {
   test('client', () async {
     var atSpiBus = DBusServer();
+    addTearDown(() async => await atSpiBus.close());
     var atSpiClientAddress = await atSpiBus
         .listenAddress(DBusAddress.unix(dir: Directory.systemTemp));
 
