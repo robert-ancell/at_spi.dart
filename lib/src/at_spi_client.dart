@@ -148,20 +148,26 @@ class AtSpiNodeAddress {
   }
 
   @override
+  bool operator ==(other) =>
+      other is AtSpiNodeAddress &&
+      other.busName == busName &&
+      other.path == path;
+
+  @override
+  int get hashCode => busName.hashCode ^ path.hashCode;
+
+  @override
   String toString() => "AtSpiNodeAddress('$busName', $path)";
 }
 
 /// A node in the tree.
 class AtSpiNode extends DBusRemoteObject {
-  final AtSpiRemoteClient remoteClient;
+  final AtSpiClient atSpiClient;
   final List<String> interfaces;
 
-  AtSpiNode(
-      {required this.remoteClient,
-      required String name,
-      required DBusObjectPath path,
-      required this.interfaces})
-      : super(remoteClient.atSpiBus, name: name, path: path);
+  AtSpiNode(this.atSpiClient, AtSpiNodeAddress address,
+      {required this.interfaces})
+      : super(atSpiClient._atSpiBus, name: address.busName, path: address.path);
 
   Future<List<AtSpiNode>> getChildren() async {
     var result = await callMethod(
@@ -171,7 +177,7 @@ class AtSpiNode extends DBusRemoteObject {
         .children
         .map((value) => AtSpiNodeAddress.fromDBusValue(value));
     return childrenAddresses
-        .map((address) => remoteClient.client._findNode(address))
+        .map((address) => atSpiClient._nodes[address])
         .where((node) => node != null)
         .cast<AtSpiNode>()
         .toList();
@@ -220,120 +226,25 @@ class AtSpiNode extends DBusRemoteObject {
   }
 }
 
-class AtSpiRemoteClient {
-  final AtSpiClient client;
-  final String name;
-  final bool isRegistry;
-  StreamSubscription<DBusSignal>? addAccessibleSubscription;
-  StreamSubscription<DBusSignal>? removeAccessibleSubscription;
-  final nodes = <DBusObjectPath, AtSpiNode>{};
-
-  DBusClient get atSpiBus => client._atSpiBus!;
-
-  AtSpiNode get root =>
-      nodes[DBusObjectPath('/org/a11y/atspi/accessible/root')]!;
-
-  AtSpiRemoteClient(this.client, this.name, {this.isRegistry = false});
-
-  Future<void> connect() async {
-    if (isRegistry) {
-      var path = DBusObjectPath('/org/a11y/atspi/accessible/root');
-      nodes[path] = AtSpiNode(
-          remoteClient: this,
-          name: name,
-          path: path,
-          interfaces: [
-            'org.a11y.atspi.Accessible',
-            'org.a11y.atspi.Component'
-          ]);
-      return;
-    }
-
-    DBusMethodSuccessResponse result;
-    addAccessibleSubscription = DBusSignalStream(atSpiBus,
-            sender: name,
-            interface: 'org.a11y.atspi.Cache',
-            name: 'AddAccessible',
-            signature: DBusSignature('((so)(so)(so)iiassusau)'))
-        .listen((signal) {
-      _processAddAccessible(signal.values[0] as DBusStruct);
-    });
-    removeAccessibleSubscription = DBusSignalStream(atSpiBus,
-            sender: name,
-            interface: 'org.a11y.atspi.Cache',
-            name: 'RemoveAccessible',
-            signature: DBusSignature('(so)'))
-        .listen((signal) {
-      _processRemoveAccessible(signal.values[0]);
-    });
-    try {
-      result = await atSpiBus.callMethod(
-          destination: name,
-          path: DBusObjectPath('/org/a11y/atspi/cache'),
-          interface: 'org.a11y.atspi.Cache',
-          name: 'GetItems',
-          replySignature: DBusSignature('a((so)(so)(so)iiassusau)'));
-    } on DBusUnknownObjectException {
-      return;
-    } on DBusUnknownMethodException {
-      return;
-    }
-
-    var addedNodes = result.returnValues[0] as DBusArray;
-    for (var node in addedNodes.children) {
-      _processAddAccessible(node as DBusStruct);
-    }
-  }
-
-  void _processAddAccessible(DBusStruct node) {
-    var values = node.children;
-    var address = AtSpiNodeAddress.fromDBusValue(values[0]);
-    assert(address.busName == name);
-    //var applicationAddress = AtSpiNodeAddress.fromDBusValue(values[1]);
-    //var parentAddress = AtSpiNodeAddress.fromDBusValue(values[2]);
-    //var ? = (values[3] as DBusInt32).value;
-    //var ? = (values[4] as DBusInt32).value;
-    var interfaces = (values[5] as DBusArray)
-        .children
-        .map((value) => (value as DBusString).value)
-        .toList();
-    //var description = (values[6] as DBusString).value;
-    //var roleNumber = (values[7] as DBusUint32).value;
-    //var role = AtSpiRole.values[roleNumber]; // FIXME: Handle errors
-    //var ? = (values[8] as DBusString).value;
-    //var state = (values[9] as DBusArray).children.map((value) => (value as DBusUint32).value).toList();
-
-    nodes[address.path] = AtSpiNode(
-        remoteClient: this,
-        name: name,
-        path: address.path,
-        interfaces: interfaces);
-  }
-
-  void _processRemoveAccessible(DBusValue value) {
-    var address = AtSpiNodeAddress.fromDBusValue(value);
-    assert(address.busName == name);
-    print('- $address');
-  }
-
-  Future<void> close() async {
-    await addAccessibleSubscription?.cancel();
-    await removeAccessibleSubscription?.cancel();
-  }
-}
-
 /// A client that connects to AT-SPI.
 class AtSpiClient {
   // The session bus.
   final DBusClient? _sessionBus;
 
   // The bus AT-SPI is running on.
-  DBusClient? _atSpiBus;
-  String? _registryOwner;
+  late final DBusClient _atSpiBus;
+  String _registryOwner = '';
+  StreamSubscription<DBusSignal>? _addAccessibleSubscription;
+  StreamSubscription<DBusSignal>? _removeAccessibleSubscription;
+  StreamSubscription<DBusSignal>? _childrenChangedSubscription;
+  StreamSubscription<DBusSignal>? _propertyChangeSubscription;
+  StreamSubscription<DBusSignal>? _stateChangedSubscription;
+  StreamSubscription<DBusNameOwnerChangedEvent>? _nameOwnerChangedSubscription;
 
-  final _remoteClients = <String, AtSpiRemoteClient>{};
+  final _nodes = <AtSpiNodeAddress, AtSpiNode>{};
 
-  AtSpiNode get root => _remoteClients[_registryOwner]!.root;
+  AtSpiNode get root => _nodes[AtSpiNodeAddress(
+      _registryOwner, DBusObjectPath('/org/a11y/atspi/accessible/root'))]!;
 
   /// Creates a new AT-SPI client connected to the session D-Bus.
   AtSpiClient({DBusClient? sessionBus}) : _sessionBus = sessionBus;
@@ -363,56 +274,121 @@ class AtSpiClient {
     }
 
     _atSpiBus = DBusClient(DBusAddress(address));
-    _registryOwner = await _atSpiBus!.getNameOwner('org.a11y.atspi.Registry');
-    _atSpiBus!.nameOwnerChanged.listen((event) {
+
+    _registryOwner =
+        await _atSpiBus.getNameOwner('org.a11y.atspi.Registry') ?? '';
+    var rootAddress = AtSpiNodeAddress(
+        _registryOwner, DBusObjectPath('/org/a11y/atspi/accessible/root'));
+    _nodes[rootAddress] = AtSpiNode(this, rootAddress,
+        interfaces: ['org.a11y.atspi.Accessible', 'org.a11y.atspi.Component']);
+
+    _addAccessibleSubscription = DBusSignalStream(_atSpiBus,
+            interface: 'org.a11y.atspi.Cache',
+            name: 'AddAccessible',
+            signature: DBusSignature('((so)(so)(so)iiassusau)'))
+        .listen((signal) {
+      _processAddAccessible(signal.values[0]);
+    });
+    _removeAccessibleSubscription = DBusSignalStream(_atSpiBus,
+            interface: 'org.a11y.atspi.Cache',
+            name: 'RemoveAccessible',
+            signature: DBusSignature('(so)'))
+        .listen((signal) {
+      var address = AtSpiNodeAddress.fromDBusValue(signal.values[0]);
+      _nodes.remove(address);
+    });
+    _childrenChangedSubscription = DBusSignalStream(_atSpiBus,
+            interface: 'org.a11y.atspi.Event.Object',
+            name: 'ChildrenChanged',
+            signature: DBusSignature('siiva{sv}'))
+        .listen((signal) {
+      //print(signal);
+    });
+    _propertyChangeSubscription = DBusSignalStream(_atSpiBus,
+            interface: 'org.a11y.atspi.Event.Object',
+            name: 'PropertyChange',
+            signature: DBusSignature('siiva{sv}'))
+        .listen((signal) {
+      print(signal);
+    });
+    _stateChangedSubscription = DBusSignalStream(_atSpiBus,
+            interface: 'org.a11y.atspi.Event.Object',
+            name: 'StateChanged',
+            signature: DBusSignature('siiva{sv}'))
+        .listen((signal) {
+      //print(signal);
+    });
+    _nameOwnerChangedSubscription =
+        _atSpiBus.nameOwnerChanged.listen((event) async {
       if (event.name == 'org.a11y.atspi.Registry') {
-        _registryOwner = event.newOwner;
+        _registryOwner = event.newOwner ?? '';
       } else if (event.oldOwner == null) {
-        _remoteClientAdded(event.name);
+        await _busNameAdded(event.name);
       } else if (event.newOwner == null) {
-        _remoteClientRemoved(event.name);
+        _busNameRemoved(event.name);
       }
     });
-    var names = await _atSpiBus!.listNames();
+    var names = await _atSpiBus.listNames();
     for (var name in names) {
-      _remoteClientAdded(name);
+      if (name != _registryOwner) {
+        await _busNameAdded(name);
+      }
     }
   }
 
-  void _remoteClientAdded(String name) {
+  Future<void> _busNameAdded(String name) async {
     if (!name.startsWith(':')) {
       return;
     }
 
-    if (_remoteClients.containsKey(name)) {
+    DBusMethodSuccessResponse result;
+    try {
+      result = await _atSpiBus.callMethod(
+          destination: name,
+          path: DBusObjectPath('/org/a11y/atspi/cache'),
+          interface: 'org.a11y.atspi.Cache',
+          name: 'GetItems',
+          replySignature: DBusSignature('a((so)(so)(so)iiassusau)'));
+    } on DBusUnknownObjectException {
+      return;
+    } on DBusUnknownMethodException {
       return;
     }
 
-    var remoteClient =
-        AtSpiRemoteClient(this, name, isRegistry: name == _registryOwner);
-    _remoteClients[name] = remoteClient;
-    remoteClient.connect();
+    var addedNodes = result.returnValues[0] as DBusArray;
+    for (var value in addedNodes.children) {
+      _processAddAccessible(value);
+    }
   }
 
-  void _remoteClientRemoved(String name) {
+  void _processAddAccessible(DBusValue value) {
+    var values = (value as DBusStruct).children;
+    var address = AtSpiNodeAddress.fromDBusValue(values[0]);
+    var interfaces = (values[5] as DBusArray)
+        .children
+        .map((value) => (value as DBusString).value)
+        .toList();
+    _nodes[address] = AtSpiNode(this, address, interfaces: interfaces);
+  }
+
+  void _busNameRemoved(String name) {
     if (!name.startsWith(':') || name == _registryOwner) {
       return;
     }
 
-    var remoteClient = _remoteClients[name];
-    _remoteClients.remove(name);
-    if (remoteClient != null) {}
-  }
-
-  AtSpiNode? _findNode(AtSpiNodeAddress address) {
-    return _remoteClients[address.busName]?.nodes[address.path];
+    // Remove all nodes from this address.
+    _nodes.removeWhere((key, value) => key.busName == name);
   }
 
   /// Terminates all active connections. If a client remains unclosed, the Dart process may not terminate.
   Future<void> close() async {
     await _sessionBus?.close();
-    for (var client in _remoteClients.values) {
-      await client.close();
-    }
+    await _addAccessibleSubscription?.cancel();
+    await _removeAccessibleSubscription?.cancel();
+    await _childrenChangedSubscription?.cancel();
+    await _propertyChangeSubscription?.cancel();
+    await _stateChangedSubscription?.cancel();
+    await _nameOwnerChangedSubscription?.cancel();
+    await _atSpiBus.close();
   }
 }
