@@ -154,7 +154,7 @@ class AtSpiNodeAddress {
       other.path == path;
 
   @override
-  int get hashCode => busName.hashCode ^ path.hashCode;
+  int get hashCode => Object.hash(busName, path);
 
   @override
   String toString() => "AtSpiNodeAddress('$busName', $path)";
